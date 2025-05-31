@@ -1,182 +1,273 @@
 // src/buttplug_connector.rs
-
 use crate::message_passing::{CommandToAsyncTasks, UpdateFromAsyncTasks, ClonableButtplugClientDevice};
 use buttplug::client::{
-    ButtplugClient, ButtplugClientDevice, ButtplugClientEvent, ButtplugClientError};
-use buttplug::core::message::{ActuatorType, ScalarCmdV4, ScalarSubcommandV4};
-
+    ButtplugClient, ButtplugClientDevice, ButtplugClientEvent, ButtplugClientError,
+};
+use buttplug::core::connector::ButtplugInProcessClientConnector;
+use buttplug::core::message::{ActuatorType, VibrateSubcommandV1, ScalarCmdV3, ScalarSubcommandV3};
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use std::sync::Arc;
 
 pub async fn run_buttplug_service_loop(
-    gui_update_sender: mpsc::Sender<UpdateFromAsyncTasks>,
-    mut command_receiver: mpsc::Receiver<CommandToAsyncTasks>,
-    _buttplug_server_address: String,
+    to_gui_sender: mpsc::Sender<UpdateFromAsyncTasks>,
+    mut from_gui_receiver: mpsc::Receiver<CommandToAsyncTasks>,
+    buttplug_server_address: String,
 ) {
-    let mut client_opt: Option<ButtplugClient> = None;
-    let mut connected_devices: Vec<ButtplugClientDevice> = Vec::new();
+    let mut optional_client: Option<ButtplugClient> = None;
+    let mut connected_devices: Vec<Arc<ButtplugClientDevice>> = Vec::new();
 
     loop {
         tokio::select! {
             biased;
-
-            Some(command) = command_receiver.recv() => {
-                match command {
+            Some(command_from_gui) = from_gui_receiver.recv() => {
+                match command_from_gui {
                     CommandToAsyncTasks::ScanForButtplugDevices => {
-                        let mut client_needs_connection_attempt = true;
-                        if let Some(ref client) = client_opt {
-                            if client.connected() {
-                                client_needs_connection_attempt = false;
+                        if optional_client.is_none() {
+                            tracing::info!("Клиент Buttplug не инициализирован. Попытка создания и подключения (InProcess)...");
+                            let new_client = ButtplugClient::new("WarThunder Haptics GUI");
+                            match new_client.connect(ButtplugInProcessClientConnector::default()).await {
+                                Ok(_) => {
+                                    optional_client = Some(new_client);
+                                    let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugConnected).await;
+                                    let _ = to_gui_sender.send(UpdateFromAsyncTasks::LogMessage("Успешно подключено к Buttplug (InProcess).".to_string())).await;
+                                }
+                                Err(connection_error) => {
+                                    tracing::error!("Не удалось подключиться к InProcess: {:?}", connection_error);
+                                    let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка подключения InProcess: {}", connection_error))).await;
+                                    let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
+                                    optional_client = None;
+                                    continue;
+                                }
                             }
-                        } else {
-                            client_opt = Some(ButtplugClient::new("WarThunder Haptics GUI"));
                         }
 
-                        if client_needs_connection_attempt {
-                            if let Some(ref client) = client_opt {
-                                tracing::info!("Клиент не подключен или только что создан. Попытка подключения (InProcess)...");
-                                // Этот метод должен быть доступен, если фича "in-process-connector" в Cargo.toml активна
-                                match client.connect_in_process(None).await {
-                                    Ok(_) => {
-                                        let _ = gui_update_sender.try_send(UpdateFromAsyncTasks::ButtplugConnected);
-                                        let _ = gui_update_sender.try_send(UpdateFromAsyncTasks::LogMessage("Успешно подключено к Buttplug (InProcess).".to_string()));
-                                    }
-                                    Err(err) => {
-                                        tracing::error!("Не удалось подключиться к InProcess: {:?}", err);
-                                        let _ = gui_update_sender.try_send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка подключения InProcess: {}", err)));
-                                        let _ = gui_update_sender.try_send(UpdateFromAsyncTasks::ButtplugDisconnected);
-                                        client_opt = None; 
-                                        continue; 
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if let Some(ref client) = client_opt {
-                            if client.connected() {
+                        if let Some(client_ref) = optional_client.as_ref() {
+                            if client_ref.connected() {
                                 tracing::info!("Начинаем сканирование устройств Buttplug...");
-                                if let Err(err) = client.start_scanning().await {
-                                    tracing::error!("Ошибка при старте сканирования: {:?}", err);
-                                    let _ = gui_update_sender.try_send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка сканирования: {}", err)));
+                                if let Err(scan_error) = client_ref.start_scanning().await {
+                                    tracing::error!("Ошибка при старте сканирования: {:?}", scan_error);
+                                    let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка сканирования: {}", scan_error))).await;
                                 } else {
-                                    let _ = gui_update_sender.try_send(UpdateFromAsyncTasks::LogMessage("Сканирование устройств Buttplug запущено.".to_string()));
+                                    let _ = to_gui_sender.send(UpdateFromAsyncTasks::LogMessage("Сканирование устройств Buttplug запущено.".to_string())).await;
                                 }
+                            } else {
+                                tracing::warn!("Клиент Buttplug не подключен. Сканирование невозможно.");
+                                optional_client = None;
+                                let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
                             }
                         }
                     }
+
                     CommandToAsyncTasks::VibrateDevice { device_index, speed } => {
-                        if let Some(ref client) = client_opt {
-                            if client.connected() {
+                        if let Some(ref client_ref) = optional_client {
+                            if client_ref.connected() {
                                 if let Some(device) = connected_devices.get(device_index) {
-                                    let device_clone = device.clone();
-                                    tracing::info!("Вибрация устройства '{}' (индекс устр.: {}) со скоростью {}", device_clone.name(), device_clone.index(), speed);
-                                    tokio::spawn(async move {
-                                        if let Some(scalar_attrs) = device_clone.message_attributes().scalar_cmd() { // scalar_cmd() возвращает Option<&Vec<Arc<ScalarCmdV4Features>>>
-                                            if let Some(vibrator_attr_feature) = scalar_attrs.iter().find(|feat_arc| feat_arc.actuator_type() == ActuatorType::Vibrate) {
-                                                let actuator_feature_idx = vibrator_attr_feature.index();
-                                                // Используем ScalarSubcommandV4 и ScalarCmdV4
-                                                let subcommands = vec![ScalarSubcommandV4::new(actuator_feature_idx, speed, ActuatorType::Vibrate)];
-                                                let cmd_to_send = ScalarCmdV4::new(device_clone.index(), subcommands);
-                                                if let Err(e) = device_clone.scalar_v2(&cmd_to_send).await { // Устройство может ожидать scalar_v2 или аналогичный для V4 команд
-                                                    tracing::error!("Ошибка вибрации устройства {}: {:?}", device_clone.name(), e);
+                                    let device_to_command = device.clone();
+                                    tracing::info!(
+                                        "Вибрация устройства '{}' (индекс GUI: {}, индекс BP: {}) со скоростью {}",
+                                        device_to_command.name(),
+                                        device_index,
+                                        device_to_command.index(),
+                                        speed
+                                    );
+
+                                    let mut vibration_command_sent = false;
+                                    if let Some(scalar_features) = device_to_command.message_attributes().scalar_cmd() {
+                                        let mut vibrate_subcommands = Vec::new();
+                                        for feature_actuator in scalar_features {
+                                            if *feature_actuator.actuator_type() == ActuatorType::Vibrate {
+                                                vibrate_subcommands.push(VibrateSubcommandV1::new(*feature_actuator.index(), speed));
+                                            }
+                                        }
+                                        if !vibrate_subcommands.is_empty() {
+                                            vibration_command_sent = true;
+                                            let assembled_vibration_command = ScalarCmdV3::new(
+                                                device_to_command.index(),
+                                                vibrate_subcommands
+                                                    .into_iter()
+                                                    .map(|v| ScalarSubcommandV3::new(v.index, v.speed, ActuatorType::Vibrate))
+                                                    .collect(),
+                                            );
+                                            let target_device_for_vibration = device_to_command.clone();
+                                            tokio::spawn(async move {
+                                                if let Err(vibration_error) = target_device_for_vibration.scalar(&assembled_vibration_command).await {
+                                                    tracing::error!(
+                                                        "Ошибка ScalarCmd для {}: {:?}",
+                                                        target_device_for_vibration.name(),
+                                                        vibration_error
+                                                    );
                                                 }
-                                            } else { tracing::warn!("Устройство {} не имеет вибраторов.", device_clone.name()); }
-                                        } else { tracing::warn!("Устройство {} не поддерживает ScalarCmd.", device_clone.name()); }
-                                    });
+                                            });
+                                        }
+                                    }
+
+                                    if !vibration_command_sent {
+                                        if let Some(scalar_features) = device_to_command.message_attributes().scalar_cmd() {
+                                            let mut scalar_subcommands_for_vibrate_fallback = Vec::new();
+                                            for feature_actuator in scalar_features {
+                                                if *feature_actuator.actuator_type() == ActuatorType::Vibrate {
+                                                    scalar_subcommands_for_vibrate_fallback.push(ScalarSubcommandV3::new(feature_actuator.index(), speed, ActuatorType::Vibrate));
+                                                }
+                                            }
+                                            if !scalar_subcommands_for_vibrate_fallback.is_empty() {
+                                                let assembled_scalar_command = ScalarCmdV3::new(
+                                                    device_to_command.index(),
+                                                    scalar_subcommands_for_vibrate_fallback
+                                                );
+                                                let target_device_for_scalar = device_to_command.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(scalar_error) = target_device_for_scalar.scalar(&assembled_scalar_command).await {
+                                                        tracing::error!(
+                                                            "Ошибка ScalarCmd (Vibrate fallback) для {}: {:?}",
+                                                            target_device_for_scalar.name(),
+                                                            scalar_error
+                                                        );
+                                                    }
+                                                });
+                                            } else {
+                                                tracing::warn!("Устройство {} не имеет подходящих скалярных вибраторов.", device_to_command.name());
+                                            }
+                                        } else {
+                                            tracing::warn!("Устройство {} не поддерживает ScalarCmd.", device_to_command.name());
+                                        }
+                                    }
+                                } else {
+                                    tracing::warn!("Устройство с GUI индексом {} не найдено.", device_index);
                                 }
+                            } else {
+                                tracing::warn!("Клиент Buttplug не подключен для VibrateDevice.");
                             }
                         }
                     }
+
                     CommandToAsyncTasks::StopDevice(device_index) => {
-                         if let Some(ref client) = client_opt {
-                            if client.connected() {
+                        if let Some(ref client_ref) = optional_client {
+                            if client_ref.connected() {
                                 if let Some(device) = connected_devices.get(device_index) {
-                                    let device_clone = device.clone();
-                                    tokio::spawn(async move { if let Err(e) = device_clone.stop().await { tracing::error!("Stop Err {}: {:?}",device_clone.name(), e);}});
+                                    let device_to_stop = device.clone();
+                                    tracing::info!(
+                                        "Остановка устройства '{}' (индекс GUI: {}, индекс BP: {})",
+                                        device_to_stop.name(),
+                                        device_index,
+                                        device_to_stop.index()
+                                    );
+                                    tokio::spawn(async move {
+                                        if let Err(stop_error) = device_to_stop.stop().await {
+                                            tracing::error!("Ошибка при остановке {}: {:?}", device_to_stop.name(), stop_error);
+                                        }
+                                    });
+                                } else {
+                                    tracing::warn!("Устройство с GUI индексом {} не найдено для StopDevice.", device_index);
                                 }
+                            } else {
+                                tracing::warn!("Клиент Buttplug не подключен для StopDevice.");
                             }
                         }
                     }
+
                     CommandToAsyncTasks::DisconnectButtplug => {
-                        if let Some(client_instance) = client_opt.take() {
-                            if client_instance.connected() { let _ = client_instance.disconnect().await; }
+                        if let Some(client_instance) = optional_client.take() {
+                            if client_instance.connected() {
+                                tracing::info!("Отключение от Buttplug сервера...");
+                                if let Err(disconnect_error) = client_instance.disconnect().await {
+                                    tracing::error!("Ошибка при отключении от Buttplug: {:?}", disconnect_error);
+                                }
+                            }
                         }
                         connected_devices.clear();
-                        let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
-                        let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Отключено от Buttplug по команде.".to_string())).await;
+                        let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
+                        let _ = to_gui_sender.send(UpdateFromAsyncTasks::LogMessage("Отключено от Buttplug сервера по команде.".to_string())).await;
                     }
-                    CommandToAsyncTasks::UpdateApplicationSettings(_settings) => {}
-                }
-            },
-            event_stream_item = async {
-                if let Some(client) = client_opt.as_ref() {
-                    if client.connected() {
-                        return client.event_stream().next().await;
-                    }
-                }
-                None
-            } => {
-                if let Some(event_result) = event_stream_item { 
-                    match event_result {
-                        Ok(actual_event) => { 
-                            match actual_event {
-                                ButtplugClientEvent::DeviceAdded(device_arc) => { 
-                                    tracing::info!("Найдено устр-во: {} (Индекс: {})", device_arc.name(), device_arc.index());
-                                    if !connected_devices.iter().any(|d| d.index() == device_arc.index()) {
-                                        connected_devices.push(device_arc.clone()); 
-                                        if gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDeviceFound(ClonableButtplugClientDevice(device_arc))).await.is_err() { return; }
-                                    }
-                                }
 
-                                ButtplugClientEvent::DeviceRemoved(device_identifier) => { 
-                                    let removed_idx = device_identifier.device_index(); // Этот метод должен быть у ButtplugClientDeviceIdentifier
-                                    tracing::info!("Устр-во удалено (Индекс устройства в сессии: {})", removed_idx);
-                                    
-                                    let mut device_to_send_lost: Option<ButtplugClientDevice> = None;
-                                    connected_devices.retain(|dev_arc_in_list| {
-                                        if dev_arc_in_list.index() == removed_idx {
-                                            device_to_send_lost = Some(dev_arc_in_list.clone());
-                                            false
-                                        } else { true }
-                                    });
-                                    if let Some(lost_arc) = device_to_send_lost { 
-                                         if gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDeviceLost(ClonableButtplugClientDevice(lost_arc))).await.is_err() { return; }
+                    _ => {}
+                }
+            }
+
+            optional_event_from_stream = async {
+                optional_client.as_ref()
+                    .and_then(|client| client.connected().then(|| client.event_stream()))
+                    .and_then(|mut stream| stream.next().now_or_never())
+                    .flatten()
+            } => {
+                match optional_event_from_stream {
+                    Some(Ok(event)) => {
+                        match event {
+                            ButtplugClientEvent::DeviceAdded(device_arc) => {
+                                tracing::info!("Найдено устр-во: {} (Индекс BP: {})", device_arc.name(), device_arc.index());
+                                if !connected_devices.iter().any(|d| d.index() == device_arc.index()) {
+                                    connected_devices.push(device_arc.clone());
+                                    if to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDeviceFound(ClonableButtplugClientDevice(device_arc))).await.is_err() {
+                                        tracing::warn!("GUI канал (DeviceFound) закрыт");
                                     }
                                 }
-                                ButtplugClientEvent::ServerDisconnect => {
-                                    tracing::info!("Buttplug сервер отключился.");
-                                    client_opt = None;
-                                    connected_devices.clear();
-                                    if gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await.is_err() { return; }
-                                    if gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Buttplug сервер отключился.".to_string())).await.is_err() { return; }
+                            }
+                            ButtplugClientEvent::DeviceRemoved(removed_device_arc) => {
+                                tracing::info!("Устр-во удалено: {} (Индекс BP: {})", removed_device_arc.name(), removed_device_arc.index());
+                                let mut device_to_send_as_lost: Option<Arc<ButtplugClientDevice>> = None;
+                                connected_devices.retain(|device_in_list| {
+                                    if device_in_list.index() == removed_device_arc.index() {
+                                        device_to_send_as_lost = Some(device_in_list.clone());
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                });
+                                if let Some(lost_device_arc) = device_to_send_as_lost {
+                                    if to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDeviceLost(ClonableButtplugClientDevice(lost_device_arc))).await.is_err() {
+                                        tracing::warn!("GUI канал (DeviceLost) закрыт");
+                                    }
                                 }
-                                _ => { /* Другие события */ }
                             }
-                        }
-                        Err(err) => {
-                            tracing::error!("Ошибка в потоке событий Buttplug: {:?}", err);
-                            if gui_update_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка потока событий: {}", err))).await.is_err() { return; }
-                            if matches!(err, ButtplugClientError::ButtplugConnectorError(_)) {
-                                client_opt = None; connected_devices.clear();
-                                if gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await.is_err() { return; }
+                            ButtplugClientEvent::ServerDisconnect => {
+                                tracing::info!("Buttplug сервер отключился.");
+                                optional_client.take();
+                                connected_devices.clear();
+                                let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
+                                let _ = to_gui_sender.send(UpdateFromAsyncTasks::LogMessage("Buttplug сервер отключился.".to_string())).await;
                             }
+                            ButtplugClientEvent::PingTimeout => {
+                                tracing::warn!("Buttplug PING таймаут. Соединение потеряно.");
+                                optional_client.take();
+                                connected_devices.clear();
+                                let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
+                                let _ = to_gui_sender.send(UpdateFromAsyncTasks::LogMessage("Buttplug PING таймаут. Соединение потеряно.".to_string())).await;
+                            }
+                            _ => {}
                         }
                     }
-                } else {
-                    if let Some(c) = client_opt.as_ref() {
-                        if !c.connected() {
-                            client_opt = None; connected_devices.clear();
-                            if gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await.is_err() { return; }
+                    Some(Err(stream_error)) => {
+                        tracing::error!("Ошибка потока событий Buttplug: {:?}", stream_error);
+                        let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка потока событий: {}", stream_error))).await;
+                        if matches!(stream_error, ButtplugClientError::ButtplugConnectorError(_)) {
+                            optional_client.take();
+                            connected_devices.clear();
+                            let _ = to_gui_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
                         }
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    None => {
+                        if optional_client.is_some() && !optional_client.as_ref().unwrap().connected() {
+                            tracing::info!("Клиент Buttplug отсоединен (поток событий завершен или соединение разорвано).");
+                            optional_client = None;
+                            connected_devices.clear();
+                            if to_gui_sender.try_send(UpdateFromAsyncTasks::ButtplugDisconnected).is_err() {
+                                tracing::warn!("GUI канал (ButtplugDisconnected) закрыт при обработке конца стрима.");
+                            }
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    }
                 }
-            },
+            }
+
             else => {
-                tracing::info!("Цикл Buttplug сервиса завершается.");
+                tracing::info!("Цикл Buttplug сервиса завершается (канал команд закрыт или другая причина).");
+                if let Some(client_instance) = optional_client.take() {
+                    if client_instance.connected() {
+                        let _ = client_instance.disconnect().await;
+                    }
+                }
                 break;
             }
         }
     }
 }
-// Вспомогательная функция attempt_client_connect была удалена, т.к. логика встроена в ScanForButtplugDevices
