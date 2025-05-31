@@ -14,8 +14,8 @@ pub struct WarThunderHapticsApplication {
     settings: ApplicationSettings,
     current_wt_indicators: Option<WarThunderIndicators>,
     game_state_snapshot: GameStateSnapshot,
-    buttplug_devices: Vec<ButtplugClientDevice>, // Vec<Arc<ButtplugDeviceImpl>>
-    selected_device_index: Option<usize>,
+    buttplug_devices: Vec<ButtplugClientDevice>, 
+    selected_device_index: Option<usize>, // Индекс в нашем векторе buttplug_devices
     is_buttplug_connected: bool,
     is_war_thunder_connected: bool,
     log_messages: Vec<String>,
@@ -79,23 +79,24 @@ impl WarThunderHapticsApplication {
                             &mut self.game_state_snapshot,
                         );
                         for device_action in actions_to_take {
-                            if let Some(device_idx) = self.selected_device_index.or_else(|| if !self.buttplug_devices.is_empty() { Some(0)} else {None} ) {
-                                if let Some(device) = self.buttplug_devices.get(device_idx) {
+                            if let Some(device_idx_in_vec) = self.selected_device_index.or_else(|| if !self.buttplug_devices.is_empty() { Some(0)} else {None} ) {
+                                if let Some(device) = self.buttplug_devices.get(device_idx_in_vec) { 
                                     match device_action.action_type {
                                         DeviceActionType::Vibrate => {
                                             self.add_log_message(format!(
-                                                "Игровое событие: вибрация устройства {} с интенсивностью {} на {} мс",
-                                                device.name(), // Прямой вызов метода
+                                                "Игровое событие: вибрация устройства {} (индекс {}) с интенсивностью {} на {} мс",
+                                                device.name(), 
+                                                device.index(), // Используем индекс устройства для лога
                                                 device_action.intensity,
                                                 device_action.duration_milliseconds
                                             ));
                                             let _ = self.command_sender.try_send(CommandToAsyncTasks::VibrateDevice {
-                                                device_index: device_idx,
+                                                device_index: device_idx_in_vec, // Индекс в нашем векторе
                                                 speed: device_action.intensity,
                                             });
                                         }
                                         DeviceActionType::Stop => {
-                                            let _ = self.command_sender.try_send(CommandToAsyncTasks::StopDevice(device_idx));
+                                            let _ = self.command_sender.try_send(CommandToAsyncTasks::StopDevice(device_idx_in_vec));
                                         }
                                     }
                                 }
@@ -117,14 +118,14 @@ impl WarThunderHapticsApplication {
                     self.selected_device_index = None;
                     self.add_log_message("Отключено от Buttplug сервера.".to_string());
                 }
-                UpdateFromAsyncTasks::ButtplugDeviceFound(device) => { // device это ButtplugClientDevice (Arc<...>)
-                    // Прямой вызов методов
-                    if !self.buttplug_devices.iter().any(|d_arc| d_arc.address() == device.address()) {
+                UpdateFromAsyncTasks::ButtplugDeviceFound(device) => { 
+                    // Используем device.index() для проверки уникальности и отображения
+                    if !self.buttplug_devices.iter().any(|d_arc| d_arc.index() == device.index()) {
                         self.add_log_message(format!(
-                            "Найдено устройство Buttplug: {} (Атрибуты: {:?}, Адрес: {})",
+                            "Найдено устройство Buttplug: {} (Индекс: {}, Атрибуты: {:?})",
                             device.name(),
-                            device.message_attributes(), // Используем message_attributes()
-                            device.address().to_string() // Используем .to_string() для DeviceAddress
+                            device.index(),
+                            device.message_attributes()
                         ));
                         self.buttplug_devices.push(device);
                         if self.selected_device_index.is_none() && !self.buttplug_devices.is_empty() {
@@ -132,9 +133,10 @@ impl WarThunderHapticsApplication {
                         }
                     }
                 }
-                UpdateFromAsyncTasks::ButtplugDeviceLost(device) => { // device это ButtplugClientDevice (Arc<...>)
-                    self.add_log_message(format!("Устройство Buttplug потеряно: {}", device.name()));
-                    self.buttplug_devices.retain(|d_arc| d_arc.address() != device.address());
+                UpdateFromAsyncTasks::ButtplugDeviceLost(device) => { 
+                    self.add_log_message(format!("Устройство Buttplug потеряно: {} (Индекс: {})", device.name(), device.index()));
+                    // Используем device.index() для сравнения
+                    self.buttplug_devices.retain(|d_arc| d_arc.index() != device.index());
                     if let Some(selected_idx) = self.selected_device_index {
                         if selected_idx >= self.buttplug_devices.len() {
                             self.selected_device_index = if self.buttplug_devices.is_empty() { None } else { Some(0) };
@@ -225,22 +227,22 @@ impl eframe::App for WarThunderHapticsApplication {
                 if self.is_buttplug_connected && !self.buttplug_devices.is_empty() {
                     ui.label("Подключенные устройства Buttplug:");
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                        for (idx, device) in self.buttplug_devices.iter().enumerate() { // device это &ButtplugClientDevice
+                        for (idx_in_vec, device) in self.buttplug_devices.iter().enumerate() { 
                             ui.selectable_value(
                                 &mut self.selected_device_index,
-                                Some(idx),
-                                // Прямой вызов методов на &ButtplugClientDevice
-                                format!("{}: {} (Адрес: {})", idx, device.name(), device.address().to_string())
+                                Some(idx_in_vec),
+                                // Используем device.index() для отображения уникального идентификатора сессии
+                                format!("{}: {} (Индекс: {})", idx_in_vec, device.name(), device.index())
                             );
                         }
                     });
 
-                    if let Some(selected_idx) = self.selected_device_index {
+                    if let Some(selected_idx_in_vec) = self.selected_device_index {
                          if ui.button("Тест вибрации выбранного").clicked() {
-                             let _ = self.command_sender.try_send(CommandToAsyncTasks::VibrateDevice{device_index: selected_idx, speed: 0.5});
+                             let _ = self.command_sender.try_send(CommandToAsyncTasks::VibrateDevice{device_index: selected_idx_in_vec, speed: 0.5});
                          }
                          if ui.button("Стоп выбранного").clicked() {
-                             let _ = self.command_sender.try_send(CommandToAsyncTasks::StopDevice(selected_idx));
+                             let _ = self.command_sender.try_send(CommandToAsyncTasks::StopDevice(selected_idx_in_vec));
                          }
                     }
                 } else if self.is_buttplug_connected {
@@ -315,7 +317,6 @@ impl eframe::App for WarThunderHapticsApplication {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Длительность (мс):");
-                    // Исправлено: clamp_range -> range
                     ui.add(egui::DragValue::new(&mut self.config_editor_new_event_duration).speed(10.0).range(0..=60000));
                 });
 
