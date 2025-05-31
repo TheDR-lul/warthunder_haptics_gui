@@ -38,9 +38,6 @@ impl WarThunderHapticsApplication {
                 ApplicationSettings::default()
             }
         };
-        // Отправляем начальные настройки в асинхронные задачи (если они их ожидают)
-        // Это может быть не нужно, если задачи сами загружают конфиг или получают его по другой команде.
-        // Для примера оставим, но это стоит пересмотреть в зависимости от логики задач.
         let _ = command_sender.try_send(CommandToAsyncTasks::UpdateApplicationSettings(initial_settings.clone()));
 
         Self {
@@ -62,9 +59,9 @@ impl WarThunderHapticsApplication {
     }
 
     fn add_log_message(&mut self, message: String) {
-        tracing::info!("{}", message); // Также логируем через tracing
-        self.log_messages.insert(0, message); // Добавляем в начало списка
-        if self.log_messages.len() > 100 { // Ограничиваем размер лога в GUI
+        tracing::info!("{}", message);
+        self.log_messages.insert(0, message);
+        if self.log_messages.len() > 100 {
             self.log_messages.pop();
         }
     }
@@ -83,12 +80,12 @@ impl WarThunderHapticsApplication {
                         );
                         for device_action in actions_to_take {
                             if let Some(device_idx) = self.selected_device_index.or_else(|| if !self.buttplug_devices.is_empty() { Some(0)} else {None} ) {
-                                if let Some(device) = self.buttplug_devices.get(device_idx) { // device это &ButtplugClientDevice
+                                if let Some(device) = self.buttplug_devices.get(device_idx) {
                                     match device_action.action_type {
                                         DeviceActionType::Vibrate => {
                                             self.add_log_message(format!(
                                                 "Игровое событие: вибрация устройства {} с интенсивностью {} на {} мс",
-                                                device.as_ref().name(), // Явное разыменование Arc через as_ref()
+                                                device.name(), // Прямой вызов метода
                                                 device_action.intensity,
                                                 device_action.duration_milliseconds
                                             ));
@@ -96,7 +93,6 @@ impl WarThunderHapticsApplication {
                                                 device_index: device_idx,
                                                 speed: device_action.intensity,
                                             });
-                                            // TODO: механизм остановки вибрации по duration_milliseconds
                                         }
                                         DeviceActionType::Stop => {
                                             let _ = self.command_sender.try_send(CommandToAsyncTasks::StopDevice(device_idx));
@@ -122,13 +118,13 @@ impl WarThunderHapticsApplication {
                     self.add_log_message("Отключено от Buttplug сервера.".to_string());
                 }
                 UpdateFromAsyncTasks::ButtplugDeviceFound(device) => { // device это ButtplugClientDevice (Arc<...>)
-                    // Явное разыменование Arc через as_ref() для доступа к методам ButtplugDeviceImpl
-                    if !self.buttplug_devices.iter().any(|d_arc| d_arc.as_ref().address() == device.as_ref().address()) {
+                    // Прямой вызов методов
+                    if !self.buttplug_devices.iter().any(|d_arc| d_arc.address() == device.address()) {
                         self.add_log_message(format!(
                             "Найдено устройство Buttplug: {} (Атрибуты: {:?}, Адрес: {})",
-                            device.as_ref().name(),
-                            device.as_ref().message_attributes(), // Используем message_attributes()
-                            device.as_ref().address_str() // address_str() для строкового представления
+                            device.name(),
+                            device.message_attributes(), // Используем message_attributes()
+                            device.address().to_string() // Используем .to_string() для DeviceAddress
                         ));
                         self.buttplug_devices.push(device);
                         if self.selected_device_index.is_none() && !self.buttplug_devices.is_empty() {
@@ -137,8 +133,8 @@ impl WarThunderHapticsApplication {
                     }
                 }
                 UpdateFromAsyncTasks::ButtplugDeviceLost(device) => { // device это ButtplugClientDevice (Arc<...>)
-                    self.add_log_message(format!("Устройство Buttplug потеряно: {}", device.as_ref().name()));
-                    self.buttplug_devices.retain(|d_arc| d_arc.as_ref().address() != device.as_ref().address());
+                    self.add_log_message(format!("Устройство Buttplug потеряно: {}", device.name()));
+                    self.buttplug_devices.retain(|d_arc| d_arc.address() != device.address());
                     if let Some(selected_idx) = self.selected_device_index {
                         if selected_idx >= self.buttplug_devices.len() {
                             self.selected_device_index = if self.buttplug_devices.is_empty() { None } else { Some(0) };
@@ -175,7 +171,6 @@ impl eframe::App for WarThunderHapticsApplication {
                          match configuration_manager::load_configuration() {
                             Ok(loaded_settings) => {
                                 self.settings = loaded_settings.clone();
-                                // Отправляем обновленные настройки в задачи, если это необходимо
                                 let _ = self.command_sender.try_send(CommandToAsyncTasks::UpdateApplicationSettings(loaded_settings));
                                 self.add_log_message("Конфигурация успешно загружена.".to_string());
                             },
@@ -229,14 +224,13 @@ impl eframe::App for WarThunderHapticsApplication {
                 });
                 if self.is_buttplug_connected && !self.buttplug_devices.is_empty() {
                     ui.label("Подключенные устройства Buttplug:");
-                    // Прокручиваемая область для списка устройств, если их много
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                         for (idx, device) in self.buttplug_devices.iter().enumerate() { // device это &ButtplugClientDevice
-                            // Явное разыменование Arc через as_ref()
                             ui.selectable_value(
                                 &mut self.selected_device_index,
                                 Some(idx),
-                                format!("{}: {} (Адрес: {})", idx, device.as_ref().name(), device.as_ref().address_str())
+                                // Прямой вызов методов на &ButtplugClientDevice
+                                format!("{}: {} (Адрес: {})", idx, device.name(), device.address().to_string())
                             );
                         }
                     });
@@ -257,7 +251,6 @@ impl eframe::App for WarThunderHapticsApplication {
 
             ui.collapsing("Данные War Thunder (Live)", |ui| {
                 if let Some(indicators) = &self.current_wt_indicators {
-                    // Пример отображения данных, можно добавить больше полей
                     egui::Grid::new("wt_indicators_grid")
                         .num_columns(2)
                         .spacing([40.0, 4.0])
@@ -266,7 +259,6 @@ impl eframe::App for WarThunderHapticsApplication {
                             ui.label("Тип техники:"); ui.label(format!("{:?}", indicators.vehicle_type.as_deref().unwrap_or("N/A"))); ui.end_row();
                             ui.label("Скорость:"); ui.label(format!("{:.2}", indicators.speed.unwrap_or(0.0))); ui.end_row();
                             ui.label("Здоровье:"); ui.label(format!("{:.2}%", indicators.health_percentage.unwrap_or(0.0))); ui.end_row();
-                            // Добавь сюда другие интересующие поля из WarThunderIndicators
                         });
                 } else {
                     ui.label("Нет данных от War Thunder.");
@@ -277,19 +269,15 @@ impl eframe::App for WarThunderHapticsApplication {
             ui.collapsing("Конфигурация действий", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Интервал опроса WT (мс):");
-                    // TODO: Сделать редактируемым и отправлять команду на обновление
                     ui.label(self.settings.polling_interval_milliseconds.to_string());
                 });
                 ui.horizontal(|ui| {
                     ui.label("Адрес сервера Buttplug (для WebSocket):");
-                    // TODO: Сделать редактируемым и отправлять команду на обновление
-                    ui.text_edit_singleline(&mut self.settings.buttplug_server_address); // Сделаем его редактируемым для примера
+                    ui.text_edit_singleline(&mut self.settings.buttplug_server_address);
                 });
-
 
                 ui.separator();
                 ui.label("Действия на события:");
-                // Прокручиваемая область для списка действий
                 egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
                     let mut action_to_delete_index: Option<usize> = None;
                     for (index, event_action) in self.settings.event_actions.iter_mut().enumerate() {
@@ -298,7 +286,6 @@ impl eframe::App for WarThunderHapticsApplication {
                                 ui.checkbox(&mut event_action.enabled, "");
                                 ui.text_edit_singleline(&mut event_action.name);
                             });
-                            // TODO: Добавить редактирование условий и самого действия (интенсивность, длительность)
                             ui.label(format!("  Действие: {:?}, Интенсивность: {:.2}, Длительность: {} мс",
                                 event_action.device_action.action_type,
                                 event_action.device_action.intensity,
@@ -316,7 +303,6 @@ impl eframe::App for WarThunderHapticsApplication {
                     }
                 });
 
-
                 ui.separator();
                 ui.label("Добавить новое действие (очень упрощенно):");
                  ui.horizontal(|ui| {
@@ -329,7 +315,8 @@ impl eframe::App for WarThunderHapticsApplication {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Длительность (мс):");
-                    ui.add(egui::DragValue::new(&mut self.config_editor_new_event_duration).speed(10.0).clamp_range(0..=60000));
+                    // Исправлено: clamp_range -> range
+                    ui.add(egui::DragValue::new(&mut self.config_editor_new_event_duration).speed(10.0).range(0..=60000));
                 });
 
                 if ui.button("Добавить действие вибрации").clicked() {
@@ -346,7 +333,6 @@ impl eframe::App for WarThunderHapticsApplication {
                         self.settings.event_actions.push(new_action);
                         self.add_log_message("Новое действие добавлено. Не забудьте сохранить конфигурацию.".to_string());
                         let _ = self.command_sender.try_send(CommandToAsyncTasks::UpdateApplicationSettings(self.settings.clone()));
-                        // Очистить поля ввода
                         self.config_editor_new_event_name = "Новое событие".to_string();
                         self.config_editor_new_event_intensity = 0.5;
                         self.config_editor_new_event_duration = 500;
@@ -359,28 +345,22 @@ impl eframe::App for WarThunderHapticsApplication {
 
             ui.collapsing("Логи", |ui| {
                 egui::ScrollArea::vertical().max_height(200.0).auto_shrink([false, false]).show(ui, |ui| {
-                    for msg in self.log_messages.iter() { // iter() чтобы не потреблять self.log_messages
+                    for msg in self.log_messages.iter() {
                         ui.label(msg);
                     }
                 });
             });
         });
 
-        context.request_repaint_after(std::time::Duration::from_millis(100)); // Для плавности и обновлений
+        context.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
-    // Метод save вызывается eframe при закрытии приложения
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        // Тут можно сохранять состояние GUI, если нужно, через _storage
-        // Но основные настройки мы сохраняем в файл через configuration_manager
         match configuration_manager::save_configuration(&self.settings) {
             Ok(_) => self.add_log_message("Конфигурация автоматически сохранена при выходе.".to_string()),
             Err(e) => self.add_log_message(format!("Ошибка автосохранения конфигурации: {}", e)),
         }
-        // Отправляем команды на остановку асинхронных задач
         let _ = self.command_sender.try_send(CommandToAsyncTasks::StopProcessing);
         let _ = self.command_sender.try_send(CommandToAsyncTasks::DisconnectButtplug);
-        // В реальном приложении здесь было бы ожидание завершения задач,
-        // но для простоты скелета мы просто посылаем команды.
     }
 }
