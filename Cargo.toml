@@ -4,3 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = "0.31.1" # Проверь актуальную версию eframe/egui
+egui = "0.31.1"   # И egui
+tokio = { version = "1.45.1", features = ["full"] } # Проверь актуальную версию tokio
+reqwest = { version = "0.12.4", features = ["json"] } # Проверь актуальную версию reqwest
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+serde_toml = "0.0.1"
+buttplug = "9.0.8" # Проверь актуальную версию buttplug
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+log = "0.4.21" # Для интеграции tracing с log-based крейтами, если понадобятся
+directories = "6.0.0" # Для поиска директории конфига
+
+[profile.release]
+opt-level = 'z'  # Оптимизация для размера
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true

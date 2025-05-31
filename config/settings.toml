@@ -1,0 +1,33 @@
+# Пример файла конфигурации
+application_name = "WarThunder Haptics GUI"
+polling_interval_milliseconds = 250 # Как часто опрашивать War Thunder (мс)
+
+# Настройки для Buttplug
+buttplug_server_address = "ws://127.0.0.1:12345" # Адрес Intiface Central/Desktop WebSocket сервера
+
+# Сопоставление событий и действий
+[[event_actions]]
+name = "Получение урона"
+enabled = true
+# Условия (пока не реализованы в скелете, но можно будет добавить)
+# war_thunder_event_type = "PlayerDamage" 
+# damage_threshold = 0.01 # Если урон больше 1%
+
+# Действия на девайсе
+# Для простоты, пока только вибрация. Можно будет расширить.
+[event_actions.device_action]
+action_type = "Vibrate"
+intensity = 0.8 # от 0.0 до 1.0
+duration_milliseconds = 500
+
+[[event_actions]]
+name = "Выстрел из главного калибра"
+enabled = true
+# war_thunder_event_type = "MainGunFired"
+
+[event_actions.device_action]
+action_type = "Vibrate"
+intensity = 1.0
+duration_milliseconds = 150
+
+# Добавь сюда больше правил по аналогии
