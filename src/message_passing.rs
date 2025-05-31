@@ -1,9 +1,9 @@
 // src/message_passing.rs
 
-use crate::configuration_manager::ApplicationSettings; // Предполагаем, что AppSettings будет там
-use crate::war_thunder_connector::WarThunderIndicators; // Пример структуры данных от WT
-use buttplug::client::ButtplugClientDevice;
-use std::sync::Arc;
+use crate::configuration_manager::ApplicationSettings;
+use crate::war_thunder_connector::WarThunderIndicators;
+// В buttplug v9 ButtplugClientDevice это уже Arc<ButtplugDeviceImpl>
+use buttplug::client::ButtplugClientDevice; // Это уже Arc<ButtplugDeviceImpl>
 
 // Сообщения от GUI к асинхронным задачам
 #[derive(Debug, Clone)]
@@ -12,10 +12,10 @@ pub enum CommandToAsyncTasks {
     StopProcessing,
     UpdateApplicationSettings(ApplicationSettings),
     VibrateDevice {
-        device_index: usize, // Индекс устройства в списке известных
+        device_index: usize,
         speed: f64,
     },
-    StopDevice(usize), // Индекс устройства
+    StopDevice(usize),
     ScanForButtplugDevices,
     DisconnectButtplug,
 }
@@ -23,14 +23,14 @@ pub enum CommandToAsyncTasks {
 // Сообщения от асинхронных задач к GUI
 #[derive(Debug, Clone)]
 pub enum UpdateFromAsyncTasks {
-    LogMessage(String), // Простое строковое сообщение для лога
+    LogMessage(String),
     WarThunderIndicatorsUpdate(WarThunderIndicators),
-    WarThunderConnectionStatus(bool), // true если подключено, false если нет
+    WarThunderConnectionStatus(bool),
     ButtplugConnected,
     ButtplugDisconnected,
-    ButtplugDeviceFound(Arc<ButtplugClientDevice>), // Передаем Arc для избежания проблем с владением
-    ButtplugDeviceLost(Arc<ButtplugClientDevice>),
+    // ButtplugClientDevice (который Arc<ButtplugDeviceImpl>) можно клонировать
+    ButtplugDeviceFound(ButtplugClientDevice),
+    ButtplugDeviceLost(ButtplugClientDevice),
     ButtplugError(String),
-    ApplicationSettingsLoaded(ApplicationSettings), // Когда настройки загружены
-    // Добавь другие типы сообщений по мере необходимости
+    ApplicationSettingsLoaded(ApplicationSettings),
 }

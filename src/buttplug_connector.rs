@@ -1,22 +1,22 @@
 // src/buttplug_connector.rs
 
 use crate::message_passing::{CommandToAsyncTasks, UpdateFromAsyncTasks};
-use buttplug::client::{ButtplugClient, ButtplugClientDevice, ButtplugClientEvent, VibrateCommand};
-use buttplug::core::connector::{
-    ButtplugConnector, ButtplugInProcessClientConnector, ButtplugWebsocketClientTransport,
+use buttplug::client::{ButtplugClient, ButtplugClientDevice, ButtplugClientEvent, ButtplugClientError}; // ButtplugClientDevice это Arc<ButtplugDeviceImpl>
+use buttplug::core::connector::ButtplugInProcessClientConnector;
+use buttplug::core::message::{ // Исправлен путь на singular 'message'
+    ActuatorType, ButtplugMessageSpecVersion, ScalarCmd, ClientMessageResult, ServerMessage, Endpoint
 };
-use buttplug::core::messages::test::DeviceAdded; // Пример, если бы имя было такое
-use futures::StreamExt; // для event_stream.next()
-use std::sync::Arc;
+use futures::StreamExt;
+use std::sync::Arc; // Может не понадобиться явно, если ButtplugClientDevice уже Arc
 use tokio::sync::mpsc;
 
 pub async fn run_buttplug_service_loop(
     gui_update_sender: mpsc::Sender<UpdateFromAsyncTasks>,
     mut command_receiver: mpsc::Receiver<CommandToAsyncTasks>,
-    mut buttplug_server_address: String, // Адрес сервера Buttplug
+    _buttplug_server_address: String, // Менее релевантно для InProcess, но оставим
 ) {
     let mut client: Option<ButtplugClient> = None;
-    let mut connected_devices: Vec<Arc<ButtplugClientDevice>> = Vec::new();
+    let mut connected_devices: Vec<ButtplugClientDevice> = Vec::new(); // Vec<Arc<ButtplugDeviceImpl>>
 
     loop {
         tokio::select! {
@@ -36,29 +36,28 @@ pub async fn run_buttplug_service_loop(
                                 let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Клиент Buttplug не подключен. Сначала подключитесь.".to_string())).await;
                             }
                         } else {
-                            // Попытка подключиться, если еще не подключены
-                            tracing::info!("Клиент Buttplug не инициализирован. Попытка подключения к {}...", buttplug_server_address);
-                             let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage(format!("Попытка подключения к Buttplug серверу: {}", buttplug_server_address))).await;
+                            tracing::info!("Клиент Buttplug не инициализирован. Попытка подключения (InProcess)...");
+                            let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Попытка подключения к Buttplug серверу (InProcess)...".to_string())).await;
 
-                            // TODO: Рассмотреть возможность выбора типа коннектора через GUI (InProcess vs WebSocket)
-                            // Пока используем WebSocket по умолчанию
-                            let connector_result = ButtplugInProcessClientConnector::new_embedded(); // Простой вариант для начала
-                            // let transport = ButtplugWebsocketClientTransport::new_insecure_connector(&buttplug_server_address);
-                            // let connector_result = ButtplugClient::connect("WarThunder Haptics", transport).await;
+                            match ButtplugInProcessClientConnector::try_create(None) { // v9.x API
+                                Ok(connector_builder) => {
+                                    let connector = connector_builder.finish();
+                                    // В v9 клиент создается с именем и принимаемой версией спеки
+                                    let new_client = ButtplugClient::new_with_options(
+                                        "WarThunder Haptics GUI",
+                                        ButtplugMessageSpecVersion::V3, // или другая версия, если нужно
+                                        true, // Allow raw messages, если нужно (обычно нет)
+                                        None // Device config map, если нужно
+                                    ).expect("Failed to create client with options"); // или обработать Result
 
-
-                            match connector_result {
-                                Ok(new_connector) => {
-                                    let new_client = ButtplugClient::new("WarThunder Haptics GUI");
-                                    if let Err(err) = new_client.connect(new_connector).await {
-                                        tracing::error!("Не удалось подключиться к встроенному коннектору Buttplug: {:?}", err);
+                                    if let Err(err) = new_client.connect(connector).await {
+                                        tracing::error!("Не удалось подключиться к InProcess коннектору Buttplug: {:?}", err);
                                         let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка подключения: {}", err))).await;
                                         let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
                                     } else {
                                         client = Some(new_client);
                                         let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugConnected).await;
-                                        let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Успешно подключено к Buttplug.".to_string())).await;
-                                        // Сразу запускаем сканирование после подключения
+                                        let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Успешно подключено к Buttplug (InProcess).".to_string())).await;
                                         if let Some(ref c) = client {
                                             if let Err(err) = c.start_scanning().await {
                                                  tracing::error!("Ошибка при старте сканирования после подключения: {:?}", err);
@@ -66,25 +65,34 @@ pub async fn run_buttplug_service_loop(
                                         }
                                     }
                                 }
-                                Err(err) => { // Это для случая если бы connect возвращал Result напрямую
-                                    tracing::error!("Не удалось создать или подключить клиент Buttplug: {:?}", err);
-                                    let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка создания клиента: {}", err))).await;
+                                Err(err) => {
+                                    tracing::error!("Не удалось создать InProcess коннектор Buttplug: {:?}", err);
+                                    let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка создания коннектора: {}", err))).await;
                                     let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
-
                                 }
                             }
                         }
                     }
                     CommandToAsyncTasks::VibrateDevice { device_index, speed } => {
-                        if let Some(ref cl) = client {
+                        if let Some(ref cl) = client { // client это &Option<ButtplugClient>
                             if cl.connected() {
-                                if let Some(device_arc) = connected_devices.get(device_index) {
-                                    let device = device_arc.clone(); // Клонируем Arc для асинхронной задачи
-                                    tracing::info!("Вибрация устройства {:?} со скоростью {}", device.name(), speed);
+                                if let Some(device) = connected_devices.get(device_index) { // device это &ButtplugClientDevice
+                                    let device_clone = device.clone(); // Клонируем Arc<ButtplugDeviceImpl>
+                                    tracing::info!("Вибрация устройства {:?} со скоростью {}", device_clone.name(), speed);
                                     tokio::spawn(async move {
-                                        if let Err(e) = device.vibrate(&VibrateCommand::Speed(speed)).await {
-                                            tracing::error!("Ошибка вибрации устройства {}: {:?}", device.name(), e);
-                                            // Тут можно отправить сообщение об ошибке в GUI, если нужно
+                                        // Ищем первый вибратор (ActuatorType::Vibrate)
+                                        if let Some(scalar_attrs) = device_clone.message_attributes().scalar_cmd() {
+                                            if let Some(vibrator_attr) = scalar_attrs.iter().find(|attr| attr.actuator_type() == &ActuatorType::Vibrate) {
+                                                let actuator_index = vibrator_attr.index();
+                                                let scalar_cmd = ScalarCmd::new(device_clone.index(), vec![(actuator_index, speed, ActuatorType::Vibrate)]); // Используем индекс устройства из device_clone.index()
+                                                if let Err(e) = device_clone.scalar(&scalar_cmd).await {
+                                                    tracing::error!("Ошибка вибрации устройства {}: {:?}", device_clone.name(), e);
+                                                }
+                                            } else {
+                                                tracing::warn!("Устройство {} не имеет вибраторов (ActuatorType::Vibrate).", device_clone.name());
+                                            }
+                                        } else {
+                                            tracing::warn!("Устройство {} не поддерживает ScalarCmd.", device_clone.name());
                                         }
                                     });
                                 } else {
@@ -98,12 +106,12 @@ pub async fn run_buttplug_service_loop(
                     CommandToAsyncTasks::StopDevice(device_index) => {
                          if let Some(ref cl) = client {
                             if cl.connected() {
-                                if let Some(device_arc) = connected_devices.get(device_index) {
-                                    let device = device_arc.clone();
-                                    tracing::info!("Остановка устройства {:?}", device.name());
+                                if let Some(device) = connected_devices.get(device_index) {
+                                    let device_clone = device.clone();
+                                    tracing::info!("Остановка устройства {:?}", device_clone.name());
                                     tokio::spawn(async move {
-                                        if let Err(e) = device.stop().await {
-                                            tracing::error!("Ошибка остановки устройства {}: {:?}", device.name(), e);
+                                        if let Err(e) = device_clone.stop().await { // stop() должен работать
+                                            tracing::error!("Ошибка остановки устройства {}: {:?}", device_clone.name(), e);
                                         }
                                     });
                                 }
@@ -114,95 +122,87 @@ pub async fn run_buttplug_service_loop(
                         if let Some(ref cl) = client {
                             if cl.connected() {
                                 tracing::info!("Отключение от Buttplug сервера...");
-                                if let Err(e) = cl.disconnect().await {
-                                    tracing::error!("Ошибка при отключении от Buttplug: {:?}", e);
-                                    let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка отключения: {}", e))).await;
-                                } else {
-                                    let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Отключено от Buttplug сервера.".to_string())).await;
-                                    let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
-                                    connected_devices.clear(); // Очищаем список устройств
-                                }
+                                // `disconnect()` возвращает Result, но мы его не обрабатываем если не нужно
+                                let _ = cl.disconnect().await; // Ошибку обработает ServerDisconnect или будет видно по connected()
+                                // Явно посылаем сообщения, так как ServerDisconnect может прийти с задержкой или не прийти если ошибка была в disconnect
+                                let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Отключено от Buttplug сервера.".to_string())).await;
+                                let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
+                                connected_devices.clear();
                             }
                         }
-                        client = None; // В любом случае сбрасываем клиента
+                        client = None; // Сбрасываем клиента в любом случае
                     }
                     CommandToAsyncTasks::UpdateApplicationSettings(settings) => {
-                        // Обновляем адрес сервера, если он изменился
-                        if buttplug_server_address != settings.buttplug_server_address {
-                            buttplug_server_address = settings.buttplug_server_address;
-                            let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage(format!("Адрес сервера Buttplug изменен на: {}", buttplug_server_address))).await;
-                            // Если клиент был подключен, его нужно будет переподключить к новому адресу
-                            // Это более сложная логика, пока просто меняем адрес для следующего подключения.
-                            if client.is_some() && client.as_ref().unwrap().connected() {
-                                let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Для применения нового адреса сервера Buttplug, пожалуйста, переподключитесь.".to_string())).await;
+                        // Адрес сервера для InProcess не так важен, но если бы был WebSocket:
+                        let new_address = settings.buttplug_server_address;
+                        if _buttplug_server_address != new_address {
+                            // _buttplug_server_address = new_address; // Не можем изменить _buttplug_server_address напрямую, если она не mut
+                            // Для изменения адреса WebSocket сервера потребовалось бы переподключение.
+                            let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage(format!("Адрес сервера Buttplug (в конфиге) изменен на: {}. Переподключитесь для WebSocket.", new_address))).await;
+                        }
+                    }
+                     _ => {}
+                }
+            },
+            // Обработка событий от клиента Buttplug
+            Some(event_result) = async { client.as_ref().map(|c| c.event_stream()).map(|mut s| s.next().await).flatten() } => {
+                // event_result это Result<ButtplugClientEvent, ButtplugClientError>
+                match event_result {
+                    Ok(event) => {
+                        match event {
+                            ButtplugClientEvent::DeviceAdded(new_device_arc) => { // new_device_arc это ButtplugClientDevice (Arc<ButtplugDeviceImpl>)
+                                tracing::info!("Найдено устройство Buttplug: {} (Индекс устр-ва: {}, Адрес: {})", new_device_arc.name(), new_device_arc.index(), new_device_arc.address());
+                                if !connected_devices.iter().any(|d_arc| d_arc.address() == new_device_arc.address()) {
+                                    connected_devices.push(new_device_arc.clone());
+                                    let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDeviceFound(new_device_arc)).await;
+                                } else {
+                                    tracing::info!("Устройство {} уже было в списке.", new_device_arc.name());
+                                }
+                            }
+                            ButtplugClientEvent::DeviceRemoved(removed_device_info) => { // removed_device_info это DeviceInfo в v9
+                                                                                        // Или это тоже Arc<ButtplugClientDevice>? Документация говорит DeviceInfo.
+                                                                                        // Если это DeviceInfo, нужно искать по индексу или адресу.
+                                                                                        // Давайте предположим, что это DeviceInfo, как часто бывает.
+                                tracing::info!("Устройство Buttplug удалено/отключено: {} (Индекс: {})", removed_device_info.name(), removed_device_info.index());
+                                let mut device_to_send_lost = None;
+                                connected_devices.retain(|dev_arc| {
+                                    if dev_arc.index() == removed_device_info.index() {
+                                        device_to_send_lost = Some(dev_arc.clone());
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                });
+                                if let Some(lost_arc) = device_to_send_lost {
+                                     let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDeviceLost(lost_arc)).await;
+                                }
+
+                            }
+                            ButtplugClientEvent::ServerDisconnect => {
+                                tracing::info!("Buttplug сервер отключился.");
+                                client = None; // Сбрасываем клиента
+                                connected_devices.clear();
+                                let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
+                                let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Buttplug сервер отключился.".to_string())).await;
+                            }
+                            other_event => {
+                                tracing::trace!("Получено другое событие Buttplug: {:?}", other_event);
                             }
                         }
                     }
-                    _ => {} // Другие команды пока игнорируем
-                }
-            },
-            // Обработка событий от клиента Buttplug (если он существует и подключен)
-            Some(event) = async { if let Some(c) = &client { c.event_stream().next().await } else { None } } => {
-                if let Some(event_result) = event { // event_stream().next() возвращает Result<ButtplugClientEvent, ButtplugError>
-                     match event_result {
-                        Ok(ButtplugClientEvent::DeviceAdded(device_message)) => {
-                            tracing::info!("Найдено устройство Buttplug: {} (Индекс: {})", device_message.name(), device_message.index());
-                            // Важно: ButtplugClientDevice создается из ButtplugClient и DeviceAdded (или Device)
-                            // Мы не можем просто взять device_message, нам нужен объект ButtplugClientDevice.
-                            // Проверим, есть ли такое устройство уже у клиента.
-                            if let Some(ref cl) = client {
-                                if let Some(device_obj) = cl.device(&device_message.address()) {
-                                     let device_arc = Arc::new(device_obj); // Создаем Arc здесь
-                                     connected_devices.push(device_arc.clone());
-                                     let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDeviceFound(device_arc)).await;
-                                } else {
-                                    tracing::warn!("Устройство {} было объявлено, но не найдено в клиенте.", device_message.name());
-                                }
-                            }
-                        }
-                        Ok(ButtplugClientEvent::DeviceRemoved(device_info)) => {
-                            tracing::info!("Устройство Buttplug удалено/отключено: (Адрес: {:?})", device_info.address());
-                            // Удаляем устройство из нашего списка
-                            let mut found_device_arc = None;
-                            connected_devices.retain(|dev_arc| {
-                                if dev_arc.address() == device_info.address() {
-                                    found_device_arc = Some(dev_arc.clone());
-                                    false // удалить из списка
-                                } else {
-                                    true // оставить в списке
-                                }
-                            });
-                            if let Some(dev_arc) = found_device_arc {
-                                let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDeviceLost(dev_arc)).await;
-                            }
-                        }
-                        Ok(ButtplugClientEvent::ServerDisconnect) => {
-                            tracing::info!("Buttplug сервер отключился.");
+                    Err(err) => {
+                        tracing::error!("Ошибка в потоке событий Buttplug: {:?}", err);
+                        let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка потока событий: {}", err))).await;
+                        if matches!(err, ButtplugClientError::ButtplugConnectorError(_)) {
+                            tracing::info!("Потеряно соединение с сервером Buttplug из-за ошибки коннектора.");
                             client = None;
                             connected_devices.clear();
                             let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
-                            let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Buttplug сервер отключился.".to_string())).await;
                         }
-                        Ok(other_event) => {
-                            tracing::trace!("Получено другое событие Buttplug: {:?}", other_event);
-                        }
-                        Err(err) => {
-                            tracing::error!("Ошибка в потоке событий Buttplug: {:?}", err);
-                            let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugError(format!("Ошибка потока событий: {}", err))).await;
-                        }
-                    }
-                } else {
-                    // Поток событий завершился, вероятно, клиент отключился
-                    if client.is_some() && !client.as_ref().unwrap().connected() {
-                         client = None;
-                         connected_devices.clear();
-                         let _ = gui_update_sender.send(UpdateFromAsyncTasks::ButtplugDisconnected).await;
-                         let _ = gui_update_sender.send(UpdateFromAsyncTasks::LogMessage("Поток событий Buttplug завершен (клиент отключен).".to_string())).await;
                     }
                 }
             },
             else => {
-                // Все каналы закрыты или произошла ошибка, выходим из цикла
                 tracing::info!("Цикл Buttplug сервиса завершается.");
                 break;
             }

@@ -16,6 +16,8 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 log = "0.4.21" # Для интеграции tracing с log-based крейтами, если понадобятся
 directories = "6.0.0" # Для поиска директории конфига
+futures = "0.3.30"    # Для StreamExt
+
 
 [profile.release]
 opt-level = 'z'  # Оптимизация для размера
