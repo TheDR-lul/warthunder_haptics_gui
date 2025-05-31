@@ -10,13 +10,13 @@ tokio = { version = "1.45.1", features = ["full"] } # Проверь актуа�
 reqwest = { version = "0.12.4", features = ["json"] } # Проверь актуальную версию reqwest
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.117"
-serde_toml = "0.0.1"
 buttplug = "9.0.8" # Проверь актуальную версию buttplug
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 log = "0.4.21" # Для интеграции tracing с log-based крейтами, если понадобятся
 directories = "6.0.0" # Для поиска директории конфига
 futures = "0.3.30"    # Для StreamExt
+toml = { version = "0.8.22", features = ["serde"] } # <--- ДОБАВЬ ЭТУ СТРОКУ (проверь актуальную версию 0.8.x или 0.9.x)
 
 [profile.release]
 opt-level = 'z'  # Оптимизация для размера
