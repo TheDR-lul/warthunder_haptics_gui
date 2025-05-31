@@ -3,9 +3,8 @@
 use crate::configuration_manager::ApplicationSettings;
 use crate::war_thunder_connector::WarThunderIndicators;
 use buttplug::client::ButtplugClientDevice; // Это Arc<ButtplugDeviceImpl>
-use std::sync::Arc; // Добавим для явного использования Arc, если потребуется
+use std::sync::Arc;
 
-// Сообщения от GUI к асинхронным задачам
 #[derive(Debug, Clone)]
 pub enum CommandToAsyncTasks {
     StartProcessing,
@@ -19,33 +18,24 @@ pub enum CommandToAsyncTasks {
     ScanForButtplugDevices,
     DisconnectButtplug,
 }
-
-// Обертка для ButtplugClientDevice, чтобы гарантировать Clone
-// Это нужно только если derive(Clone) на UpdateFromAsyncTasks не работает напрямую с ButtplugClientDevice
 #[derive(Debug)]
-pub struct ClonableButtplugClientDevice(pub ButtplugClientDevice);
+pub struct ClonableButtplugClientDevice(pub Arc<ButtplugClientDevice>);
 
 impl Clone for ClonableButtplugClientDevice {
     fn clone(&self) -> Self {
-        ClonableButtplugClientDevice(self.0.clone()) // Клонируем внутренний Arc
+        Self(Arc::clone(&self.0))
     }
 }
 
-
-// Сообщения от асинхронных задач к GUI
-#[derive(Debug, Clone)] // Clone должен работать для ApplicationSettings, String, bool, WarThunderIndicators
+#[derive(Debug, Clone)] 
 pub enum UpdateFromAsyncTasks {
     LogMessage(String),
     WarThunderIndicatorsUpdate(WarThunderIndicators),
     WarThunderConnectionStatus(bool),
     ButtplugConnected,
     ButtplugDisconnected,
-    // Используем нашу обертку, если прямой Clone для ButtplugClientDevice не работает
-    ButtplugDeviceFound(ClonableButtplugClientDevice),
-    ButtplugDeviceLost(ClonableButtplugClientDevice),
-    // Или, если ButtplugClientDevice сам по себе Clone (что должно быть правдой, т.к. это Arc):
-    // ButtplugDeviceFound(ButtplugClientDevice),
-    // ButtplugDeviceLost(ButtplugClientDevice),
+    ButtplugDeviceFound(ClonableButtplugClientDevice), // Используем обертку
+    ButtplugDeviceLost(ClonableButtplugClientDevice),  // Используем обертку
     ButtplugError(String),
     ApplicationSettingsLoaded(ApplicationSettings),
 }

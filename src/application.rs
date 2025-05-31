@@ -2,11 +2,11 @@
 
 use crate::configuration_manager::{self, ApplicationSettings, EventActionSetting, DeviceAction, DeviceActionType};
 use crate::game_event_processor::{self, GameStateSnapshot};
-use crate::message_passing::{CommandToAsyncTasks, UpdateFromAsyncTasks};
+use crate::message_passing::{CommandToAsyncTasks, UpdateFromAsyncTasks, ClonableButtplugClientDevice}; // Добавили ClonableButtplugClientDevice
 use crate::war_thunder_connector::WarThunderIndicators;
 use eframe::egui;
 use tokio::sync::mpsc;
-use buttplug::client::ButtplugClientDevice; // Это Arc<ButtplugDeviceImpl> в v9
+use buttplug::client::ButtplugClientDevice; 
 
 pub struct WarThunderHapticsApplication {
     command_sender: mpsc::Sender<CommandToAsyncTasks>,
@@ -14,8 +14,13 @@ pub struct WarThunderHapticsApplication {
     settings: ApplicationSettings,
     current_wt_indicators: Option<WarThunderIndicators>,
     game_state_snapshot: GameStateSnapshot,
+    // Храним ClonableButtplugClientDevice, чтобы соответствовать сообщениям
+    // Или конвертируем при получении, но для простоты UI будем хранить его.
+    // Либо храним ButtplugClientDevice и конвертируем при отправке/получении, если Clone для enum не нужен.
+    // Пока оставим Vec<ButtplugClientDevice>, а Clonable используется только в канале.
+    // Это значит, что при получении ClonableButtplugClientDevice мы будем извлекать .0
     buttplug_devices: Vec<ButtplugClientDevice>, 
-    selected_device_index: Option<usize>, // Индекс в нашем векторе buttplug_devices
+    selected_device_index_in_vec: Option<usize>,
     is_buttplug_connected: bool,
     is_war_thunder_connected: bool,
     log_messages: Vec<String>,
@@ -46,8 +51,8 @@ impl WarThunderHapticsApplication {
             settings: initial_settings,
             current_wt_indicators: None,
             game_state_snapshot: GameStateSnapshot::default(),
-            buttplug_devices: Vec::new(),
-            selected_device_index: None,
+            buttplug_devices: Vec::new(), // Здесь храним оригинальный ButtplugClientDevice
+            selected_device_index_in_vec: None,
             is_buttplug_connected: false,
             is_war_thunder_connected: false,
             log_messages: vec!["Приложение запущено.".to_string()],
@@ -79,19 +84,19 @@ impl WarThunderHapticsApplication {
                             &mut self.game_state_snapshot,
                         );
                         for device_action in actions_to_take {
-                            if let Some(device_idx_in_vec) = self.selected_device_index.or_else(|| if !self.buttplug_devices.is_empty() { Some(0)} else {None} ) {
+                            if let Some(device_idx_in_vec) = self.selected_device_index_in_vec.or_else(|| if !self.buttplug_devices.is_empty() { Some(0)} else {None} ) {
                                 if let Some(device) = self.buttplug_devices.get(device_idx_in_vec) { 
                                     match device_action.action_type {
                                         DeviceActionType::Vibrate => {
                                             self.add_log_message(format!(
-                                                "Игровое событие: вибрация устройства {} (индекс {}) с интенсивностью {} на {} мс",
+                                                "Игровое событие: вибрация устр-ва '{}' (индекс {}) инт. {} на {} мс",
                                                 device.name(), 
-                                                device.index(), // Используем индекс устройства для лога
+                                                device.index(),
                                                 device_action.intensity,
                                                 device_action.duration_milliseconds
                                             ));
                                             let _ = self.command_sender.try_send(CommandToAsyncTasks::VibrateDevice {
-                                                device_index: device_idx_in_vec, // Индекс в нашем векторе
+                                                device_index: device_idx_in_vec, 
                                                 speed: device_action.intensity,
                                             });
                                         }
@@ -115,11 +120,11 @@ impl WarThunderHapticsApplication {
                 UpdateFromAsyncTasks::ButtplugDisconnected => {
                     self.is_buttplug_connected = false;
                     self.buttplug_devices.clear();
-                    self.selected_device_index = None;
+                    self.selected_device_index_in_vec = None;
                     self.add_log_message("Отключено от Buttplug сервера.".to_string());
                 }
-                UpdateFromAsyncTasks::ButtplugDeviceFound(device) => { 
-                    // Используем device.index() для проверки уникальности и отображения
+                UpdateFromAsyncTasks::ButtplugDeviceFound(clonable_device) => { 
+                    let device = clonable_device.0; // Извлекаем внутренний ButtplugClientDevice
                     if !self.buttplug_devices.iter().any(|d_arc| d_arc.index() == device.index()) {
                         self.add_log_message(format!(
                             "Найдено устройство Buttplug: {} (Индекс: {}, Атрибуты: {:?})",
@@ -127,19 +132,19 @@ impl WarThunderHapticsApplication {
                             device.index(),
                             device.message_attributes()
                         ));
-                        self.buttplug_devices.push(device);
-                        if self.selected_device_index.is_none() && !self.buttplug_devices.is_empty() {
-                            self.selected_device_index = Some(0);
+                        self.buttplug_devices.push(device); // Храним оригинальный ButtplugClientDevice
+                        if self.selected_device_index_in_vec.is_none() && !self.buttplug_devices.is_empty() {
+                            self.selected_device_index_in_vec = Some(0);
                         }
                     }
                 }
-                UpdateFromAsyncTasks::ButtplugDeviceLost(device) => { 
+                UpdateFromAsyncTasks::ButtplugDeviceLost(clonable_device) => { 
+                    let device = clonable_device.0; // Извлекаем внутренний ButtplugClientDevice
                     self.add_log_message(format!("Устройство Buttplug потеряно: {} (Индекс: {})", device.name(), device.index()));
-                    // Используем device.index() для сравнения
                     self.buttplug_devices.retain(|d_arc| d_arc.index() != device.index());
-                    if let Some(selected_idx) = self.selected_device_index {
+                    if let Some(selected_idx) = self.selected_device_index_in_vec {
                         if selected_idx >= self.buttplug_devices.len() {
-                            self.selected_device_index = if self.buttplug_devices.is_empty() { None } else { Some(0) };
+                            self.selected_device_index_in_vec = if self.buttplug_devices.is_empty() { None } else { Some(0) };
                         }
                     }
                 }
@@ -161,7 +166,8 @@ impl eframe::App for WarThunderHapticsApplication {
 
         egui::TopBottomPanel::top("top_panel").show(context, |ui| {
             egui::menu::bar(ui, |ui| {
-                ui.menu_button("Файл", |ui| {
+                // ... (меню Файл и Управление без изменений) ...
+                 ui.menu_button("Файл", |ui| {
                     if ui.button("Сохранить конфигурацию").clicked() {
                         match configuration_manager::save_configuration(&self.settings) {
                             Ok(_) => self.add_log_message("Конфигурация успешно сохранена.".to_string()),
@@ -214,6 +220,7 @@ impl eframe::App for WarThunderHapticsApplication {
             ui.separator();
 
             ui.collapsing("Статус", |ui| {
+                // ... (статус WT и Buttplug сервера без изменений) ...
                 ui.horizontal(|ui| {
                     ui.label("War Thunder API:");
                     ui.label(egui::RichText::new(if self.is_war_thunder_connected { "ПОДКЛЮЧЕНО" } else { "ОТКЛЮЧЕНО" })
@@ -224,20 +231,20 @@ impl eframe::App for WarThunderHapticsApplication {
                     ui.label(egui::RichText::new(if self.is_buttplug_connected { "ПОДКЛЮЧЕНО" } else { "ОТКЛЮЧЕНО" })
                         .color(if self.is_buttplug_connected { egui::Color32::GREEN } else { egui::Color32::RED }));
                 });
+
                 if self.is_buttplug_connected && !self.buttplug_devices.is_empty() {
                     ui.label("Подключенные устройства Buttplug:");
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                         for (idx_in_vec, device) in self.buttplug_devices.iter().enumerate() { 
                             ui.selectable_value(
-                                &mut self.selected_device_index,
+                                &mut self.selected_device_index_in_vec,
                                 Some(idx_in_vec),
-                                // Используем device.index() для отображения уникального идентификатора сессии
                                 format!("{}: {} (Индекс: {})", idx_in_vec, device.name(), device.index())
                             );
                         }
                     });
 
-                    if let Some(selected_idx_in_vec) = self.selected_device_index {
+                    if let Some(selected_idx_in_vec) = self.selected_device_index_in_vec {
                          if ui.button("Тест вибрации выбранного").clicked() {
                              let _ = self.command_sender.try_send(CommandToAsyncTasks::VibrateDevice{device_index: selected_idx_in_vec, speed: 0.5});
                          }
@@ -250,7 +257,7 @@ impl eframe::App for WarThunderHapticsApplication {
                 }
             });
             ui.separator();
-
+            // ... (остальные секции UI без изменений: Данные WT, Конфигурация, Логи) ...
             ui.collapsing("Данные War Thunder (Live)", |ui| {
                 if let Some(indicators) = &self.current_wt_indicators {
                     egui::Grid::new("wt_indicators_grid")
